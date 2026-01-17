@@ -1,6 +1,6 @@
 ---
 name: polars-bio
-description: A skill for processing genomic data using polars-bio, focusing on VCF loading and interval joins.
+description: A high-performance skill for processing genomic data (VCF, FASTA, BED) using polars-bio. Features streaming VCF processing, interval joins, FASTA analysis, and variant annotation.
 license: Apache-2.0
 ---
 
@@ -8,42 +8,72 @@ license: Apache-2.0
 
 ## Overview
 
-This skill demonstrates how to use `polars-bio` (and `polars`) to efficiently process genomic data. It specifically covers loading Variant Call Format (VCF) files and performing interval joins (overlaps) with other genomic intervals.
+This skill leverages `polars-bio` and `polars` to provide a robust toolkit for large-scale genomic data analysis. It is designed to handle datasets larger than memory using Polars' streaming engine and lazy evaluation.
 
 ## Capabilities
 
-- **VCF Ingestion:** High-performance loading of VCF files into Polars DataFrames.
-- **Interval Joins:** Efficient overlap joins between genomic intervals (e.g., finding which variants fall within specific genomic regions).
+### 1. VCF Processing
+*   **Lazy Loading:** Use `pb.scan_vcf()` to define execution plans without loading data into memory immediately.
+*   **Streaming Conversion:** Efficiently convert VCFs to Parquet (`sink_parquet`) for faster downstream queries.
+*   **Filtering & Cleaning:** Parse INFO fields and filter variants using Polars expressions.
+
+### 2. Genomic Interval Operations
+*   **Overlap Joins:** High-performance interval joins (finding variants within genomic regions like Cytobands or Genes) using `pb.overlap()`.
+
+### 3. Sequence Analysis
+*   **FASTA Processing:** Lazy reading of FASTA files (`pb.scan_fasta`) to calculate sequence metrics (e.g., GC content, sequence length).
+
+### 4. Variant Annotation
+*   **Database Integration:** Annotate VCF variants with external datasets (e.g., gnomAD, dbSNP) using efficient point-joins on `chrom`, `start`, `ref`, `alt`.
 
 ## Quick Start
+
+### Basic VCF Loading & Interval Join
 
 ```python
 import polars as pl
 import polars_bio as pb
 
-# Load a VCF file
-vcf_df = pb.read_vcf("path/to/file.vcf")
+# 1. Lazy Load VCF
+vcf_lf = pb.scan_vcf("data/clinvar.vcf.gz")
 
-# Create or load intervals (e.g., from a BED file or DataFrame)
-regions_df = pl.DataFrame({
-    "chrom": ["chr1", "chr1"],
-    "start": [100, 200],
-    "end": [150, 250],
-    "region_name": ["region_1", "region_2"]
-})
+# 2. Load Regions (e.g., BED file)
+regions_lf = pl.scan_csv("data/regions.bed", separator="\t", has_header=False, 
+                         new_columns=["chrom", "start", "end", "name"])
 
-# Perform an interval join (overlap)
-# Finds variants in vcf_df that overlap with regions_df
-joined_df = vcf_df.pb.overlap(
-    regions_df,
-    on=["chrom", "start", "end"], # Columns to join on
-    method="inner" # or "left", "outer"
-)
+# 3. Perform Interval Overlap
+# Finds variants in VCF that overlap with regions
+joined_lf = pb.overlap(vcf_lf, regions_lf)
 
-print(joined_df)
+# 4. Execute (Streaming)
+result = joined_lf.collect(streaming=True)
+print(result)
 ```
+
+### Convert VCF to Parquet
+
+```python
+# Efficiently convert large VCF to Parquet without high memory usage
+pb.scan_vcf("input.vcf").sink_parquet("output.parquet")
+```
+
+### FASTA GC Content Analysis
+
+```python
+lf = pb.scan_fasta("genome.fa")
+lf = lf.with_columns(
+    pl.col("sequence").str.count_matches("G|C").alias("gc_count"),
+    pl.col("sequence").str.len_chars().alias("len")
+)
+print(lf.select(pl.col("gc_count").sum() / pl.col("len").sum()).collect())
+```
+
+## Benchmarks
+
+The skill includes a benchmark comparing **Eager** vs. **Streaming** execution. Streaming mode has been shown to reduce memory usage by **~33%** on standard workloads. See `ANALYSIS_REPORT.md` for details.
 
 ## Dependencies
 
 - `polars`
 - `polars-bio`
+- `pyarrow` (for Parquet)
