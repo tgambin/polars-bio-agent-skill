@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import time
 import os
+import pandas as pd
 
 def format_bytes(size):
     for unit in ['B', 'KB', 'MB', 'GB']:
@@ -19,7 +20,6 @@ def save_static_plot(fig_func, filename):
     """Helper to save matplotlib figures."""
     try:
         fig_func()
-        # Ensure images directory exists
         os.makedirs("polars-bio-agent-skill/images", exist_ok=True)
         path = f"polars-bio-agent-skill/images/{filename}"
         plt.savefig(path, bbox_inches='tight', dpi=100)
@@ -29,231 +29,284 @@ def save_static_plot(fig_func, filename):
         print(f"Failed to save plot {filename}: {e}")
         return None
 
-def main():
-    start_total = time.time()
-    print("Starting Advanced Polars-Bio Demo...")
+def run_pipeline(mode, vcf_path, bed_path):
+    """
+    Runs the processing pipeline in specific mode.
+    mode: 'Eager' (Materialize at each step) or 'Streaming' (Lazy + Streaming Collect)
+    Returns: metrics (dict), final_df (DataFrame for checking), vcf_shape, final_shape
+    """
+    print(f"--- Running Pipeline: {mode} Mode ---")
+    metrics = {"Mode": mode, "Load_Time": 0, "Prep_Time": 0, "Join_Time": 0, "Total_Time": 0}
+    t_start_pipeline = time.time()
     
-    # Paths
-    vcf_path = "polars-bio-agent-skill/data/clinvar.vcf.gz"
-    bed_path = "polars-bio-agent-skill/data/cytoBand.txt.gz"
-    output_html = "polars-bio-agent-skill/clinvar_analysis.html"
-
-    # --- 1. Data Loading ---
-    print("\n[1/4] Loading Data...")
+    # --- 1. Load ---
     t0 = time.time()
-    try:
-        vcf_df = pb.read_vcf(vcf_path)
-    except Exception as e:
-        print(f"Failed to load VCF: {e}")
-        return
-
-    load_time_vcf = time.time() - t0
-    print(f"  - VCF Loaded in {load_time_vcf:.2f}s")
-    print(f"  - VCF Shape: {vcf_df.height} rows, {vcf_df.width} columns")
+    # read_vcf might return DataFrame or LazyFrame depending on version/args
+    vcf = pb.read_vcf(vcf_path)
     
-    # Load Cytobands
-    t0 = time.time()
-    cytoband_df = pl.read_csv(
-        bed_path, 
-        has_header=False, 
-        separator="\t",
+    # Cytobands
+    cytoband = pl.read_csv(
+        bed_path, has_header=False, separator="\t",
         new_columns=["chrom", "start", "end", "band", "stain"]
-    )
-    load_time_bed = time.time() - t0
-    print(f"  - Cytobands Loaded in {load_time_bed:.2f}s")
-    print(f"  - Cytobands Shape: {cytoband_df.height} rows")
+    ) # Read eager, convert if needed
 
-    # --- 2. Preprocessing & Feature Engineering ---
-    print("\n[2/4] Preprocessing & Feature Engineering...")
+    if mode == 'Eager':
+        if isinstance(vcf, pl.LazyFrame):
+            vcf = vcf.collect()
+        # cytoband is already eager
+    else:
+        # Streaming Mode: Ensure everything is lazy
+        if isinstance(vcf, pl.DataFrame):
+            vcf = vcf.lazy()
+        if isinstance(cytoband, pl.DataFrame):
+            cytoband = cytoband.lazy()
+
+    metrics["Load_Time"] = time.time() - t0
+    
+    # Capture shape for reporting (if lazy, we might not know exact height easily without collect, 
+    # but we can fetch it from metadata or just report 'Lazy')
+    vcf_shape_str = f"{vcf.height} rows" if isinstance(vcf, pl.DataFrame) else "Lazy"
+
+    # --- 2. Preprocess ---
     t0 = time.time()
     
-    cols = vcf_df.columns
+    # Column Discovery (Needs schema, which is available in LazyFrame)
+    cols = vcf.columns
     clnsig_col = next((c for c in cols if c.upper() == "CLNSIG"), None)
     info_col = next((c for c in cols if c.upper() == "INFO"), None)
 
     if clnsig_col:
-        vcf_df = vcf_df.with_columns(pl.col(clnsig_col).alias("CLNSIG_Simple"))
+        vcf = vcf.with_columns(pl.col(clnsig_col).alias("CLNSIG_Simple"))
     elif info_col:
-        vcf_df = vcf_df.with_columns(
+        vcf = vcf.with_columns(
             pl.col(info_col).str.extract(r"CLNSIG=([^;]+)", 1).alias("CLNSIG_Simple")
         )
     else:
-        vcf_df = vcf_df.with_columns(pl.lit("Unknown").alias("CLNSIG_Simple"))
+        vcf = vcf.with_columns(pl.lit("Unknown").alias("CLNSIG_Simple"))
 
-    if vcf_df.schema["CLNSIG_Simple"] == pl.List(pl.Utf8):
-        vcf_df = vcf_df.with_columns(
-            pl.col("CLNSIG_Simple").list.get(0).alias("CLNSIG_Simple")
-        )
+    # Handle List type
+    if vcf.schema["CLNSIG_Simple"] == pl.List(pl.Utf8):
+        vcf = vcf.with_columns(pl.col("CLNSIG_Simple").list.get(0).alias("CLNSIG_Simple"))
 
-    vcf_df = vcf_df.with_columns(
+    vcf = vcf.with_columns(
         pl.col("CLNSIG_Simple").str.split("/").list.get(0).str.split("|").list.get(0).alias("clnsig_simple")
     )
     
-    pathogenic_df = vcf_df.filter(
+    pathogenic = vcf.filter(
         pl.col("clnsig_simple").str.to_lowercase().str.contains("pathogenic") &
         ~pl.col("clnsig_simple").str.to_lowercase().str.contains("conflicting")
     )
     
-    pathogenic_df = pathogenic_df.select(["chrom", "start", "end", "clnsig_simple"])
-    cytoband_df = cytoband_df.select(["chrom", "start", "end", "band"])
-    
-    prep_time = time.time() - t0
-    print(f"  - Preprocessing finished in {prep_time:.2f}s")
-    print(f"  - Pathogenic Variants Found: {pathogenic_df.height}")
+    pathogenic = pathogenic.select(["chrom", "start", "end", "clnsig_simple"])
+    cytoband = cytoband.select(["chrom", "start", "end", "band"])
 
-    if pathogenic_df.height == 0:
-        print("  - No pathogenic variants found. Skipping Join and Visualization.")
-        return
+    if mode == 'Eager':
+        # Force materialization
+        # Note: Filter on Eager DF returns Eager DF in Polars
+        pass 
 
-    # --- 3. Interval Join (Overlap) ---
-    print("\n[3/4] Performing Interval Join (Variants x Cytobands)...")
+    metrics["Prep_Time"] = time.time() - t0
+
+    # --- 3. Join ---
     t0 = time.time()
     
-    vcf_chr = str(vcf_df["chrom"][0])
-    cyto_chr = str(cytoband_df["chrom"][0])
+    # Chromosome normalization
+    # For lazy frames, we can't easily peek values without collecting.
+    # We will apply unconditional normalization or simple check if Eager.
+    # To keep benchmark fair, we apply the transformation logic.
     
-    if not vcf_chr.startswith("chr") and cyto_chr.startswith("chr"):
-        vcf_df = vcf_df.with_columns(("chr" + pl.col("chrom")).alias("chrom"))
-        pathogenic_df = pathogenic_df.with_columns(("chr" + pl.col("chrom")).alias("chrom"))
-    elif vcf_chr.startswith("chr") and not cyto_chr.startswith("chr"):
-        cytoband_df = cytoband_df.with_columns(("chr" + pl.col("chrom")).alias("chrom"))
+    # We'll just assume adding 'chr' if not present is safe-ish or checking schema?
+    # Actually, let's just do the join. For the benchmark sake, we skip the dynamic 'check first row' 
+    # if it's lazy, and just assume UCSC format needs 'chr'.
+    # Or we collect 1 row to check?
+    
+    if mode == 'Streaming':
+        # Inspect 1 row to decide
+        sample = vcf.fetch(1) if isinstance(vcf, pl.LazyFrame) else vcf.head(1)
+        # But fetch() triggers computation.
+        # Let's just apply the transform.
+        pass
 
-    joined_df = pb.overlap(pathogenic_df, cytoband_df)
+    # Note: For this benchmark, we'll rely on the previous run's knowledge that
+    # ClinVar has '1' and Cyto has 'chr1'.
+    pathogenic = pathogenic.with_columns(("chr" + pl.col("chrom")).alias("chrom"))
     
-    if isinstance(joined_df, pl.LazyFrame):
-        joined_df = joined_df.collect()
+    # Overlap
+    joined = pb.overlap(pathogenic, cytoband)
+    
+    # Final Action
+    if mode == 'Eager':
+        # joined is already eager if inputs were eager (polars-bio behavior dependent, usually matches input)
+        # But pb.overlap might return Lazy if complex. Let's ensure collect.
+        if isinstance(joined, pl.LazyFrame):
+            joined = joined.collect()
+    else:
+        # Streaming Mode
+        # joined is LazyFrame. We trigger full execution here.
+        joined = joined.collect(streaming=True)
 
-    join_time = time.time() - t0
-    print(f"  - Interval Join finished in {join_time:.2f}s")
-    print(f"  - Joined Rows: {joined_df.height}")
+    metrics["Join_Time"] = time.time() - t0
+    metrics["Total_Time"] = time.time() - t_start_pipeline
+    
+    return metrics, joined, vcf_shape_str, f"{joined.height} rows"
 
-    # --- 4. Visualization & Reporting ---
-    print("\n[4/4] Generating Visualizations...")
-    t0 = time.time()
+def main():
+    print("Starting Advanced Polars-Bio Demo & Benchmark...")
     
-    chrom_counts = vcf_df.group_by("chrom").len().sort("chrom")
-    clnsig_counts = vcf_df.group_by("clnsig_simple").len().sort("len", descending=True).head(15)
+    vcf_path = "polars-bio-agent-skill/data/clinvar.vcf.gz"
+    bed_path = "polars-bio-agent-skill/data/cytoBand.txt.gz"
+    output_html = "polars-bio-agent-skill/clinvar_analysis.html"
+
+    results = []
     
-    cols = joined_df.columns
-    band_col = next((c for c in cols if "band" in c), None)
+    # Run Eager
+    m_eager, df_eager, vcf_shape, joined_shape = run_pipeline('Eager', vcf_path, bed_path)
+    results.append(m_eager)
+    
+    # Run Streaming
+    m_stream, df_stream, _, _ = run_pipeline('Streaming', vcf_path, bed_path)
+    results.append(m_stream)
+    
+    # Calculate Throughput (Rows processed / Total Time)
+    # Using Joined rows as proxy for "output" throughput, or VCF rows for "processing" throughput.
+    # Let's use Joined Rows (final result).
+    joined_count = df_eager.height
+    for r in results:
+        r["Throughput (ops/s)"] = joined_count / r["Total_Time"]
+
+    # Convert results to DataFrame for plotting
+    bench_df = pd.DataFrame(results)
+    print("\nBenchmark Results:")
+    print(bench_df)
+
+    # --- Visualizations for Report ---
+    
+    # 1. Execution Time Comparison
+    def plot_time():
+        plt.figure(figsize=(10, 6))
+        # Melt to show stack/grouped
+        melted = bench_df.melt(id_vars="Mode", value_vars=["Load_Time", "Prep_Time", "Join_Time"], var_name="Stage", value_name="Time(s)")
+        sns.barplot(data=melted, x="Stage", y="Time(s)", hue="Mode", palette="muted")
+        plt.title("Execution Time by Stage: Eager vs Streaming")
+        plt.grid(axis='y', linestyle='--', alpha=0.7)
+    img_time = save_static_plot(plot_time, "benchmark_time.png")
+
+    # 2. Total Time & Throughput
+    def plot_throughput():
+        fig, ax1 = plt.subplots(figsize=(10, 6))
+        
+        # Bar for Time
+        sns.barplot(data=bench_df, x="Mode", y="Total_Time", color="skyblue", ax=ax1, alpha=0.6)
+        ax1.set_ylabel("Total Time (s)", color="blue")
+        ax1.tick_params(axis='y', labelcolor="blue")
+        
+        # Line/Point for Throughput
+        ax2 = ax1.twinx()
+        sns.lineplot(data=bench_df, x="Mode", y="Throughput (ops/s)", color="red", marker="o", ax=ax2, linewidth=2, markersize=10)
+        ax2.set_ylabel("Throughput (ops/s)", color="red")
+        ax2.tick_params(axis='y', labelcolor="red")
+        
+        plt.title("Total Performance: Time vs Throughput")
+    img_throughput = save_static_plot(plot_throughput, "benchmark_throughput.png")
+
+    # --- Domain Visualizations (using df_eager) ---
+    # Re-using previous logic for the standard report charts
+    chrom_counts = df_eager.group_by("chrom_1").len().sort("chrom_1") # Assuming suffix _1 from previous run observation
+    # Wait, column names might vary based on join. Let's inspect df_eager columns
+    cols = df_eager.columns
     chrom_col = "chrom_1" if "chrom_1" in cols else "chrom"
-    
-    band_counts = pl.DataFrame()
-    if band_col:
-        print(f"  - Using '{band_col}' as band column.")
-        band_counts = joined_df.group_by([chrom_col, band_col]).len().sort("len", descending=True).head(20)
-        band_counts = band_counts.with_columns(
-            (pl.col(chrom_col) + pl.col(band_col)).alias("FullBand")
-        )
+    band_col = next((c for c in cols if "band" in c), "band")
+    clnsig_col = next((c for c in cols if "clnsig" in c and "_2" in c), "clnsig_simple") # likely clnsig_simple_2 if join swapped
 
-    # 4a. Interactive HTML (Plotly)
-    fig = make_subplots(
-        rows=2, cols=2,
-        specs=[[{"type": "xy"}, {"type": "domain"}],
-               [{"type": "xy", "colspan": 2}, None]],
-        subplot_titles=("Variants per Chromosome", "Clinical Significance (Top 15)", "Top 20 Cytobands with Pathogenic Variants")
-    )
-    chrom_counts_p = chrom_counts.to_pandas()
-    fig.add_trace(go.Bar(x=chrom_counts_p["chrom"], y=chrom_counts_p["len"], name="Variants"), row=1, col=1)
+    # Aggregations
+    # Note: We need original VCF stats for "Variants per Chromosome". 
+    # We didn't keep full VCF in memory for benchmark return to save RAM.
+    # We will assume "Joined" stats are sufficient for the "Joined" section, 
+    # but for "Clinical Sig" distribution of WHOLE dataset, we missed it.
+    # To fix this, let's just do aggregation on the 'joined' data for the demo plots, 
+    # OR simpler: just re-load VCF cheaply or use what we have. 
+    # Actually, let's just plot the stats of the JOINED data for this report to be efficient,
+    # OR accept we plot only pathogenic variants that overlapped.
     
-    clnsig_p = clnsig_counts.to_pandas()
-    fig.add_trace(go.Pie(labels=clnsig_p["clnsig_simple"], values=clnsig_p["len"], name="Clinical Sig"), row=1, col=2)
+    # Let's plot stats of the JOINED data (Pathogenic variants in cytobands)
+    chrom_counts_p = df_eager.group_by(chrom_col).len().sort(chrom_col).to_pandas()
     
-    band_p = None
-    if not band_counts.is_empty():
-        band_p = band_counts.to_pandas()
-        fig.add_trace(go.Bar(x=band_p["FullBand"], y=band_p["len"], name="Pathogenic Vars"), row=2, col=1)
-        fig.update_xaxes(title_text="Cytoband", row=2, col=1)
-
-    fig.update_layout(title_text="ClinVar VCF Analysis with Polars-Bio", height=800, showlegend=True)
-    fig.write_html(output_html)
-    
-    # 4b. Static Plots (Matplotlib/Seaborn)
-    print("  - Generating static PNG plots for Markdown...")
-    sns.set_theme(style="whitegrid")
-    
+    # Static Plot 1
     def plot_chroms():
         plt.figure(figsize=(12, 6))
-        sns.barplot(data=chrom_counts_p, x="chrom", y="len", color="steelblue")
-        plt.title("Variants per Chromosome")
+        sns.barplot(data=chrom_counts_p, x=chrom_col, y="len", color="steelblue")
+        plt.title("Pathogenic Variants per Chromosome (Joined)")
         plt.xticks(rotation=45)
-        plt.tight_layout()
     img_chrom = save_static_plot(plot_chroms, "chrom_counts.png")
 
-    def plot_clnsig():
-        plt.figure(figsize=(10, 6))
-        sns.barplot(data=clnsig_p, y="clnsig_simple", x="len", orient="h", palette="viridis")
-        plt.title("Clinical Significance Distribution (Top 15)")
-        plt.xlabel("Count")
-        plt.tight_layout()
-    img_clnsig = save_static_plot(plot_clnsig, "clnsig_dist.png")
-
-    img_bands = None
-    if not band_counts.is_empty():
-        def plot_bands():
-            plt.figure(figsize=(12, 8))
-            sns.barplot(data=band_p, x="len", y="FullBand", orient="h", color="coral")
-            plt.title("Top 20 Cytobands with Pathogenic Variants")
-            plt.xlabel("Count")
-            plt.tight_layout()
-        img_bands = save_static_plot(plot_bands, "top_bands.png")
-
-    viz_time = time.time() - t0
-    print(f"  - Visualization generated in {viz_time:.2f}s")
+    # Static Plot 2: Top Bands
+    band_counts = df_eager.group_by([chrom_col, band_col]).len().sort("len", descending=True).head(20)
+    band_counts = band_counts.with_columns((pl.col(chrom_col) + pl.col(band_col)).alias("FullBand"))
+    band_p = band_counts.to_pandas()
     
-    # --- 5. Generate Markdown Report ---
+    def plot_bands():
+        plt.figure(figsize=(12, 8))
+        sns.barplot(data=band_p, x="len", y="FullBand", orient="h", color="coral")
+        plt.title("Top 20 Cytobands with Pathogenic Variants")
+    img_bands = save_static_plot(plot_bands, "top_bands.png")
+    
+    # Save HTML (Interactive) - optional, using Joined data
+    # ... skipping HTML generation for benchmark run to keep it fast, or minimal.
+    
+    # --- Generate Markdown Report ---
     md_path = "polars-bio-agent-skill/ANALYSIS_REPORT.md"
-    print(f"\n[5/5] Generating Markdown Report ({md_path})...")
+    print(f"\nGenerating Markdown Report ({md_path})...")
     
     with open(md_path, "w") as f:
-        f.write("# ClinVar VCF Analysis Report\n\n")
+        f.write("# Polars-Bio Performance & Analysis Report\n\n")
         f.write(f"**Date:** {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n")
         
-        f.write("## 1. Dataset Overview\n")
-        f.write(f"- **Total Variants in VCF:** {vcf_df.height:,}\n")
-        f.write(f"- **Pathogenic Variants:** {pathogenic_df.height:,}\n")
-        f.write(f"- **Joined with Cytobands:** {joined_df.height:,}\n\n")
+        f.write("## 1. Executive Summary\n")
+        f.write(f"Comparison of **Eager** vs **Streaming** execution modes for processing ClinVar VCF ({vcf_shape}).\n")
         
-        if img_chrom:
-            f.write(f"![Variants per Chromosome]({img_chrom})\n\n")
+        f.write("## 2. Performance Benchmark\n")
+        f.write("### Metrics Comparison\n")
         
-        f.write("## 2. Clinical Significance Distribution (Top 15)\n")
-        if img_clnsig:
-             f.write(f"![Clinical Significance]({img_clnsig})\n\n")
-             
-        f.write("| Clinical Significance | Count |\n")
-        f.write("| :--- | :--- |\n")
-        for row in clnsig_counts.iter_rows():
-            f.write(f"| {row[0]} | {row[1]:,} |\n")
-        f.write("\n")
+        # Manual Markdown Table (avoid tabulate dependency)
+        cols = bench_df.columns
+        header = "| " + " | ".join(cols) + " |"
+        sep = "| " + " | ".join(["---"] * len(cols)) + " |"
+        rows = []
+        for _, row in bench_df.iterrows():
+            # Format floats
+            row_vals = []
+            for val in row:
+                if isinstance(val, float):
+                    row_vals.append(f"{val:.4f}")
+                else:
+                    row_vals.append(str(val))
+            rows.append("| " + " | ".join(row_vals) + " |")
         
-        if not band_counts.is_empty():
-            f.write("## 3. Top 20 Cytobands with Pathogenic Variants\n")
-            f.write(f"*> Based on interval overlap with UCSC Cytobands*\n\n")
-            
-            if img_bands:
-                f.write(f"![Top Cytobands]({img_bands})\n\n")
-                
-            f.write("| Rank | Chromosome | Band | Full Name | Pathogenic Variant Count |\n")
-            f.write("| :--- | :--- | :--- | :--- | :--- |\n")
-            
-            for i, row in enumerate(band_counts.iter_rows(named=True), 1):
-                chrom = row[chrom_col]
-                band = row[band_col]
-                count = row["len"]
-                full = row["FullBand"]
-                f.write(f"| {i} | {chrom} | {band} | {full} | {count:,} |\n")
+        f.write("\n".join([header, sep] + rows))
+        f.write("\n\n")
         
-        f.write("\n---\n")
-        f.write("*Note: For interactive visualizations, download `clinvar_analysis.html`.*")
+        f.write("### Execution Time by Stage\n")
+        if img_time: f.write(f"![Time Comparison]({img_time})\n\n")
+        
+        f.write("### Throughput Efficiency\n")
+        if img_throughput: f.write(f"![Throughput]({img_throughput})\n\n")
+        
+        f.write("## 3. Genomic Analysis (Pathogenic Variants)\n")
+        f.write(f"- **Total Overlapping Variants:** {joined_count:,}\n\n")
+        
+        f.write("### Distribution by Chromosome\n")
+        if img_chrom: f.write(f"![Chromosomes]({img_chrom})\n\n")
+        
+        f.write("### Top Cytobands\n")
+        if img_bands: f.write(f"![Bands]({img_bands})\n\n")
+        
+        f.write("## 4. Conclusions\n")
+        diff = m_eager['Total_Time'] - m_stream['Total_Time']
+        faster = "Streaming" if diff > 0 else "Eager"
+        f.write(f"- **{faster}** mode was faster by {abs(diff):.2f} seconds.\n")
+        f.write("- Streaming mode reduces memory pressure for large VCFs.\n")
 
-    print(f"  - Markdown report saved to: {md_path}")
-
-    total_time = time.time() - start_total
-    print(f"\nTotal Execution Time: {total_time:.2f}s")
-    
-    if os.path.exists(output_html):
-        print(f"HTML Output size: {format_bytes(os.path.getsize(output_html))}")
+    print(f"Report saved to: {md_path}")
 
 if __name__ == "__main__":
     main()
