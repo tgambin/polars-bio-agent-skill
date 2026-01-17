@@ -1,0 +1,3 @@
+polars
+polars-bio
+pytest
