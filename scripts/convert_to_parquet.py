@@ -6,6 +6,7 @@ import os
 def convert_vcf_to_parquet(vcf_path, parquet_path):
     """
     Converts a VCF file to Parquet format using streaming.
+    Returns dict with metrics.
     """
     print(f"Converting {vcf_path} to {parquet_path}...")
     t0 = time.time()
@@ -21,8 +22,14 @@ def convert_vcf_to_parquet(vcf_path, parquet_path):
     
     # Verify result
     df = pl.read_parquet(parquet_path)
-    print(f"Parquet Shape: {df.height} rows, {df.width} columns")
-    print(f"Parquet Size: {os.path.getsize(parquet_path) / (1024*1024):.2f} MB")
+    size_mb = os.path.getsize(parquet_path) / (1024*1024)
+    
+    return {
+        "Time (s)": dt,
+        "Rows": df.height,
+        "Size (MB)": size_mb,
+        "Compression Ratio": (os.path.getsize(vcf_path) / os.path.getsize(parquet_path)) if os.path.exists(vcf_path) else 0
+    }
 
 def main():
     # Use existing sample data
@@ -33,7 +40,8 @@ def main():
         print(f"Error: {vcf_path} not found. Please run advanced_demo.py first or download data.")
         return
 
-    convert_vcf_to_parquet(vcf_path, parquet_path)
+    metrics = convert_vcf_to_parquet(vcf_path, parquet_path)
+    print(metrics)
 
 if __name__ == "__main__":
     main()

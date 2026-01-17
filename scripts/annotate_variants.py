@@ -2,60 +2,49 @@ import polars as pl
 import polars_bio as pb
 import numpy as np
 import os
+import time
 
 def create_mock_gnomad(vcf_path, out_path):
     print("Creating mock gnomAD dataset from ClinVar sample...")
-    # Read ClinVar to get real loci
+    if not os.path.exists(vcf_path):
+         raise FileNotFoundError(f"VCF not found: {vcf_path}")
+         
     vcf = pb.read_vcf(vcf_path).select(["chrom", "start", "ref", "alt"]).unique()
-    
-    # Sample 50,000 variants to simulate coverage
     mock_db = vcf.sample(n=50000, seed=42)
-    
-    # Add random Allele Frequency (AF)
-    # Using numpy to generate random float array
     af_values = np.random.beta(a=0.5, b=5, size=mock_db.height)
-    
-    mock_db = mock_db.with_columns(
-        pl.Series("gnomad_af", af_values)
-    )
-    
-    # Save as Parquet
+    mock_db = mock_db.with_columns(pl.Series("gnomad_af", af_values))
     mock_db.write_parquet(out_path)
-    print(f"Mock gnomAD saved to {out_path} ({mock_db.height} variants)")
 
 def annotate_variants(vcf_path, db_path):
     print("\nAnnotating ClinVar with gnomAD (Mock)...")
+    t0 = time.time()
     
-    # Lazy read both
     vcf = pb.scan_vcf(vcf_path)
     gnomad = pl.scan_parquet(db_path)
     
-    # VCF uses 'start' for position.
-    # Join Keys: chrom, start, ref, alt
-    # Note: Ensure types match (chrom usually str)
-    
-    # Standard Polars Join
     annotated = vcf.join(
         gnomad,
         on=["chrom", "start", "ref", "alt"],
         how="left"
     )
     
-    # Filter for annotated variants (where gnomad_af is not null)
-    # Collect a sample
-    result = annotated.filter(pl.col("gnomad_af").is_not_null()) \
-                      .select(["chrom", "start", "ref", "alt", "gnomad_af"])
-                      .head(10)
-                      .collect()
+    # Calculate stats
+    stats = annotated.select([
+        pl.len().alias("total"),
+        pl.col("gnomad_af").is_not_null().sum().alias("annotated_count")
+    ]).collect()
     
-    print("Sample Annotated Variants:")
-    print(result)
+    dt = time.time() - t0
     
-    # Stats
-    total = vcf.select(pl.len()).collect().item()
-    annotated_count = annotated.filter(pl.col("gnomad_af").is_not_null()).select(pl.len()).collect().item()
-    print(f"\nTotal Variants: {total}")
-    print(f"Annotated Variants: {annotated_count} ({annotated_count/total:.1%})")
+    total = stats["total"][0]
+    annotated_count = stats["annotated_count"][0]
+    
+    return {
+        "Time (s)": dt,
+        "Total Variants": total,
+        "Annotated Variants": annotated_count,
+        "Annotation Rate": annotated_count / total if total > 0 else 0
+    }
 
 def main():
     vcf_path = "polars-bio-agent-skill/data/clinvar.vcf.gz"
@@ -69,7 +58,8 @@ def main():
     if not os.path.exists(db_path):
         create_mock_gnomad(vcf_path, db_path)
         
-    annotate_variants(vcf_path, db_path)
+    metrics = annotate_variants(vcf_path, db_path)
+    print(metrics)
 
 if __name__ == "__main__":
     main()

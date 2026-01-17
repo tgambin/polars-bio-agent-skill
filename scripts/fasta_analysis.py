@@ -11,12 +11,8 @@ def analyze_fasta(fasta_path):
     lf = pb.scan_fasta(fasta_path)
     
     # Calculate GC Content
-    # Schema usually: id, description, seq
-    # We calculate (count(G) + count(C)) / len(seq)
-    
-    # Note: Sequences in FASTA can be UPPER or lower case.
     lf = lf.with_columns(
-        pl.col("seq").str.to_uppercase().alias("seq_upper")
+        pl.col("sequence").str.to_uppercase().alias("seq_upper")
     )
     
     lf = lf.with_columns(
@@ -28,14 +24,20 @@ def analyze_fasta(fasta_path):
         (pl.col("gc_count") / pl.col("seq_len")).alias("gc_content")
     )
     
-    # Aggregation: Average GC content across all sequences (e.g. contigs/chromosomes)
-    # For chr22.fa.gz, there might be one main sequence and random contigs.
+    # Aggregate results (Weighted average GC)
+    result = lf.select([
+        pl.col("seq_len").sum().alias("total_len"),
+        pl.col("gc_count").sum().alias("total_gc")
+    ]).collect()
     
-    result = lf.select(["id", "seq_len", "gc_content"]).collect()
-    
+    avg_gc = result["total_gc"][0] / result["total_len"][0]
     dt = time.time() - t0
-    print(f"Analysis complete in {dt:.2f}s")
-    print(result)
+    
+    return {
+        "Time (s)": dt,
+        "Total Sequence Length (bp)": result["total_len"][0],
+        "Average GC Content": avg_gc
+    }
 
 def main():
     fasta_path = "polars-bio-agent-skill/data/chr22.fa.gz"
@@ -44,7 +46,8 @@ def main():
         print(f"Error: {fasta_path} not found.")
         return
 
-    analyze_fasta(fasta_path)
+    metrics = analyze_fasta(fasta_path)
+    print(metrics)
 
 if __name__ == "__main__":
     main()
