@@ -1,13 +1,17 @@
 # ClinVar VCF Analysis Report
 
-**Date:** 2026-01-17 14:19:15
+**Date:** 2026-01-17 14:23:21
 
 ## 1. Dataset Overview
 - **Total Variants in VCF:** 4,276,954
 - **Pathogenic Variants:** 321,506
 - **Joined with Cytobands:** 321,328
 
+![Variants per Chromosome](images/chrom_counts.png)
+
 ## 2. Clinical Significance Distribution (Top 15)
+![Clinical Significance](images/clnsig_dist.png)
+
 | Clinical Significance | Count |
 | :--- | :--- |
 | Uncertain_significance | 2,253,051 |
@@ -28,6 +32,8 @@
 
 ## 3. Top 20 Cytobands with Pathogenic Variants
 *> Based on interval overlap with UCSC Cytobands*
+
+![Top Cytobands](images/top_bands.png)
 
 | Rank | Chromosome | Band | Full Name | Pathogenic Variant Count |
 | :--- | :--- | :--- | :--- | :--- |
@@ -53,4 +59,4 @@
 | 20 | chr21 | q22.3 | chr21q22.3 | 2,049 |
 
 ---
-*Note: For interactive visualizations (Sunburst, Genome Density), please download and open `clinvar_analysis.html` locally.*
+*Note: For interactive visualizations, download `clinvar_analysis.html`.*
