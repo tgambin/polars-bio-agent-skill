@@ -18,9 +18,9 @@ def main():
     print("Starting Advanced Polars-Bio Demo...")
     
     # Paths
-    vcf_path = "polars-bio/data/clinvar.vcf.gz"
-    bed_path = "polars-bio/data/cytoBand.txt.gz"
-    output_html = "polars-bio/clinvar_analysis.html"
+    vcf_path = "polars-bio-agent-skill/data/clinvar.vcf.gz"
+    bed_path = "polars-bio-agent-skill/data/cytoBand.txt.gz"
+    output_html = "polars-bio-agent-skill/clinvar_analysis.html"
 
     # --- 1. Data Loading ---
     print("\n[1/4] Loading Data...")
@@ -216,19 +216,61 @@ def main():
         showlegend=True
     )
     
-    # Save
+    # Save HTML
     fig.write_html(output_html)
     
     viz_time = time.time() - t0
     print(f"  - Visualization generated in {viz_time:.2f}s")
     print(f"  - Report saved to: {output_html}")
     
+    # --- 5. Generate Markdown Report ---
+    # Since GitHub doesn't render HTML, we create a Markdown summary for easy viewing.
+    md_path = "polars-bio-agent-skill/ANALYSIS_REPORT.md"
+    print(f"\n[5/5] Generating Markdown Report ({md_path})...")
+    
+    with open(md_path, "w") as f:
+        f.write("# ClinVar VCF Analysis Report\n\n")
+        f.write(f"**Date:** {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+        f.write("## 1. Dataset Overview\n")
+        f.write(f"- **Total Variants in VCF:** {vcf_df.height:,}\n")
+        f.write(f"- **Pathogenic Variants:** {pathogenic_df.height:,}\n")
+        f.write(f"- **Joined with Cytobands:** {joined_df.height:,}\n\n")
+        
+        f.write("## 2. Clinical Significance Distribution (Top 15)\n")
+        f.write("| Clinical Significance | Count |\n")
+        f.write("| :--- | :--- |\n")
+        for row in clnsig_counts.iter_rows():
+            f.write(f"| {row[0]} | {row[1]:,} |\n")
+        f.write("\n")
+        
+        if not band_counts.is_empty():
+            f.write("## 3. Top 20 Cytobands with Pathogenic Variants\n")
+            f.write(f"*> Based on interval overlap with UCSC Cytobands*\n\n")
+            f.write("| Rank | Chromosome | Band | Full Name | Pathogenic Variant Count |\n")
+            f.write("| :--- | :--- | :--- | :--- | :--- |\n")
+            
+            # band_counts columns: chrom_1, band_1, len, FullBand
+            # We iterate and print
+            for i, row in enumerate(band_counts.iter_rows(named=True), 1):
+                # Columns might vary slightly in name due to previous logic, so we access by name from aggregation
+                # The aggregation created: chrom_col, band_col, "len", "FullBand"
+                chrom = row[chrom_col]
+                band = row[band_col]
+                count = row["len"]
+                full = row["FullBand"]
+                f.write(f"| {i} | {chrom} | {band} | {full} | {count:,} |\n")
+        
+        f.write("\n---\n")
+        f.write("*Note: For interactive visualizations (Sunburst, Genome Density), please download and open `clinvar_analysis.html` locally.*")
+
+    print(f"  - Markdown report saved to: {md_path}")
+
     total_time = time.time() - start_total
     print(f"\nTotal Execution Time: {total_time:.2f}s")
     
     # Check output size
     if os.path.exists(output_html):
-        print(f"Output size: {format_bytes(os.path.getsize(output_html))}")
+        print(f"HTML Output size: {format_bytes(os.path.getsize(output_html))}")
 
 if __name__ == "__main__":
     main()
