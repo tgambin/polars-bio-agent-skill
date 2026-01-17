@@ -63,22 +63,26 @@ def run_pipeline_task(mode, vcf_path, bed_path, result_queue):
         
         # --- 1. Load ---
         t0 = time.time()
-        vcf = pb.read_vcf(vcf_path)
         
-        # Cytobands
-        cytoband = pl.read_csv(
-            bed_path, has_header=False, separator="\t",
-            new_columns=["chrom", "start", "end", "band", "stain"]
-        )
-
-        if mode == 'Eager':
+        if mode == 'Streaming':
+            # Use scan_vcf for lazy loading
+            vcf = pb.scan_vcf(vcf_path)
+            # Cytoband is small, but let's be consistent
+            cytoband = pl.scan_csv(
+                bed_path, has_header=False, separator="\t",
+                new_columns=["chrom", "start", "end", "band", "stain"]
+            )
+        else:
+            # Eager Mode
+            vcf = pb.read_vcf(vcf_path)
+            cytoband = pl.read_csv(
+                bed_path, has_header=False, separator="\t",
+                new_columns=["chrom", "start", "end", "band", "stain"]
+            )
+            
+            # Ensure Materialization for Eager Benchmarking
             if isinstance(vcf, pl.LazyFrame):
                 vcf = vcf.collect()
-        else:
-            if isinstance(vcf, pl.DataFrame):
-                vcf = vcf.lazy()
-            if isinstance(cytoband, pl.DataFrame):
-                cytoband = cytoband.lazy()
 
         metrics["Load_Time"] = time.time() - t0
         

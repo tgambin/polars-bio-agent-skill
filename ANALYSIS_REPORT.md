@@ -1,6 +1,6 @@
 # Polars-Bio Performance & Analysis Report
 
-**Date:** 2026-01-17 14:41:15
+**Date:** 2026-01-17 14:47:17
 
 ## 1. Executive Summary
 Comparison of **Eager** vs **Streaming** execution modes for processing ClinVar VCF.
@@ -10,8 +10,8 @@ Memory usage is measured using isolated processes.
 ### Metrics Comparison
 | Mode | Load_Time | Prep_Time | Join_Time | Total_Time | Result_Rows | Memory_Peak_MB |
 | --- | --- | --- | --- | --- | --- | --- |
-| Eager | 42.31 | 0.26 | 0.15 | 42.72 | 321328 | 7793.70 |
-| Streaming | 42.37 | 0.00 | 0.26 | 42.64 | 321328 | 7622.65 |
+| Eager | 42.67 | 0.26 | 0.16 | 43.09 | 321328 | 7796.58 |
+| Streaming | 0.02 | 0.00 | 41.80 | 41.83 | 321328 | 5176.28 |
 
 ### Execution Time by Stage
 ![Time Comparison](images/benchmark_time.png)
